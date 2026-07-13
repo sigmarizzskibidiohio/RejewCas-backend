@@ -10,12 +10,13 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// БЕССМЕРТНОЕ ОБЛАЧНОЕ JSON ХРАНИЛИЩЕ (ТВОЙ БАКЕТ)
+// БЕССМЕРТНОЕ ОБЛАЧНОЕ JSON ХРАНИЛИЩЕ (KVDB.IO)
 // ==========================================
-const KVDB_BUCKET_ID = 'AHkNCjefJ5mgtXCZxuzFq9'; 
-const KVDB_URL = `https://kvdb.io/${KVDB_BUCKET_ID}/users_database`;
+const KVDB_BUCKET_ID = '5mTLLiyYaFAK8D3K2o2PyP'; 
+const KVDB_URL = `https://kvdb.io/${KVDB_BUCKET_ID}/db_file`;
 
 let users = {};
+let isDirty = false; 
 
 // Загрузка базы данных из облака при старте или просыпании Render
 async function loadDatabase() {
@@ -25,24 +26,40 @@ async function loadDatabase() {
         console.log(`[Облако DB] Успешно скачано профилей: ${Object.keys(users).length}`);
     } catch (error) {
         if (error.response && error.response.status === 404) {
-            console.log('[Облако DB] База пустая, инициализируем чистый JSON.');
+            console.log('[Облако DB] База пустая на kvdb.io. Инициализируем чистый JSON.');
             users = {};
-            await saveDatabase();
+            isDirty = true;
+            await saveDatabaseNow();
         } else {
             console.error('[Облако DB] Ошибка подключения к kvdb:', error.message);
         }
     }
 }
 
-// Сохранение измененного JSON обратно в облако
-async function saveDatabase() {
+// Принудительное сохранение прямо сейчас
+async function saveDatabaseNow() {
     try {
-        await axios.put(KVDB_URL, users);
-        console.log('[Облако DB] Изменения успешно перезаписаны в JSON!');
+        await axios.put(KVDB_URL, users, {
+            headers: { 'Content-Type': 'application/json' }
+        });
+        isDirty = false;
+        console.log('[Облако DB] Изменения успешно перезаписаны в JSON на kvdb.io!');
     } catch (error) {
-        console.error('[Облако DB] Ошибка при сохранении JSON в облако:', error.message);
+        console.error('[Облако DB] Ошибка сохранения данных в облако:', error.message);
     }
 }
+
+// Умное сохранение: взводим флаг изменений
+function queueSave() {
+    isDirty = true;
+}
+
+// Проверка авто-сейва каждые 5 секунд
+setInterval(async () => {
+    if (isDirty) {
+        await saveDatabaseNow();
+    }
+}, 5000);
 
 // Инициализация юзера
 function initUser(userId, username, nickname) {
@@ -58,14 +75,14 @@ function initUser(userId, username, nickname) {
             currentCitizenship: 'Без гражданства',
             ownedProperties: [],
             stats: { total: 0, wins: 0, losses: 0 },
-            messages: [],       // Логи переводов RejewPay
-            gameHistory: [],    // Логи игр
+            messages: [],       
+            gameHistory: [],    
             activeCrashRound: null
         };
-        saveDatabase(); 
+        queueSave(); 
     } else if (username && users[sId].username !== cleanUsername) {
         users[sId].username = cleanUsername;
-        saveDatabase();
+        queueSave();
     }
     return users[sId];
 }
@@ -85,7 +102,7 @@ app.post('/api/user', async (req, res) => {
     res.json(user);
 });
 
-// ПЕРЕВОДЫ REJEWPAY С ПЕРЕЗАПИСЬЮ ЗНАЧЕНИЙ В JSON
+// ПЕРЕВОДЫ REJEWPAY С СОХРАНЕНИЕМ
 app.post('/api/rejewpay/transfer', async (req, res) => {
     const { senderId, receiverUsername, amount, comment } = req.body;
     
@@ -106,11 +123,9 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     const transactionId = `TX-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
     const timestamp = new Date().toISOString();
 
-    // Меняем значения прямо в структуре JSON
     sender.balance -= intAmount;
     receiver.balance += intAmount;
 
-    // Записываем историю перевода внутрь профилей
     const transferLog = {
         id: transactionId, amount: intAmount, comment: finalComment, timestamp,
         senderUsername: sender.username, receiverUsername: receiver.username
@@ -118,13 +133,11 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     sender.messages.push({ ...transferLog, type: 'transfer_out', partnerNickname: receiver.nickname });
     receiver.messages.push({ ...transferLog, type: 'transfer_in', partnerNickname: sender.nickname });
 
-    // Пушим обновленный JSON в облако
-    await saveDatabase();
-
+    queueSave(); 
     res.json({ success: true, newBalance: sender.balance, transactionId });
 });
 
-// МАГАЗИН: ИГРОК ПОКУПАЕТ -> СЕРВЕР МЕНЯЕТ ЗНАЧЕНИЯ В JSON
+// МАГАЗИН: ПОКУПКА С ИЗМЕНЕНИЕМ ЗНАЧЕНИЙ В JSON
 app.post('/api/buy', async (req, res) => {
     const { userId, itemId, itemName, cost, type } = req.body;
     const user = users[String(userId)];
@@ -133,7 +146,6 @@ app.post('/api/buy', async (req, res) => {
     const intCost = parseInt(cost);
     if (user.balance < intCost) return res.status(400).json({ error: "Не хватает коинов" });
 
-    // Сервер меняет значения в JSON файле
     user.balance -= intCost;
     if (!user.ownedProperties.includes(itemId)) {
         user.ownedProperties.push(itemId);
@@ -151,11 +163,11 @@ app.post('/api/buy', async (req, res) => {
         timestamp: new Date().toISOString()
     });
 
-    await saveDatabase();
+    queueSave();
     res.json(user);
 });
 
-// Игры: Слоты (Спины)
+// Игры: Слоты
 app.post('/api/games/slots', async (req, res) => {
     const { userId, bet } = req.body;
     const user = users[String(userId)];
@@ -180,7 +192,7 @@ app.post('/api/games/slots', async (req, res) => {
     user.stats.total += 1;
     if (isWin) user.stats.wins += 1; else user.stats.losses += 1;
 
-    await saveDatabase();
+    queueSave();
     res.json({ r1, r2, r3, winAmount, isWin, newBalance: user.balance });
 });
 
@@ -199,27 +211,26 @@ app.post('/api/games/plinko', async (req, res) => {
     const winAmount = Math.floor(intBet * multiplier);
     
     user.balance = user.balance - intBet + winAmount;
-    await saveDatabase();
+    queueSave();
     
     res.json({ bucketIndex, multiplier, winAmount, newBalance: user.balance });
 });
 
-// Админка надува баланса
+// Админка
 app.post('/api/admin/add', async (req, res) => {
     const { targetUserId, amount } = req.body;
     const user = users[String(targetUserId)];
     if (!user) return res.status(404).json({ error: "User not found" });
     
     user.balance += parseInt(amount || 0);
-    await saveDatabase();
+    queueSave();
     res.json({ success: true });
 });
 
-// Стартуем сервер и качаем базу
 app.listen(PORT, async () => {
     console.log(`==================================================`);
     console.log(` Бэк RejewCas успешно запущен на порту: ${PORT}`);
-    console.log(` Хранилище подключено к контейнеру: ${KVDB_BUCKET_ID}`);
+    console.log(` База данных привязана к ключу: ${KVDB_BUCKET_ID}`);
     console.log(`==================================================`);
     await loadDatabase();
 });
