@@ -1,7 +1,7 @@
 {
   "name": "rejewcas-backend",
   "version": "1.0.0",
-  "description": "Продвинутый бэк на Node.js для RejewCas с бессмертным JSON-сохранением",
+  "description": "Продвинутый бэк на Node.js для RejewCas с бессмертным JSON-сохранением в Supabase",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -10,7 +10,7 @@
   "keywords": [
     "express",
     "backend",
-    "kvdb",
+    "supabase",
     "telegram-webapp"
   ],
   "author": "",
