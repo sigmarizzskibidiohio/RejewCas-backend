@@ -1,17 +1,26 @@
 {
   "name": "rejewcas-backend",
   "version": "1.0.0",
-  "description": "Backend for RejewCas Telegram Web App",
+  "description": "Продвинутый бэк на Node.js для RejewCas с бессмертным JSON-сохранением",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
+  "keywords": [
+    "express",
+    "backend",
+    "kvdb",
+    "telegram-webapp"
+  ],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
-    "body-parser": "^1.20.2",
+    "axios": "^1.7.2",
     "cors": "^2.8.5",
     "express": "^4.19.2"
   },
-  "engines": {
-    "node": ">=18.0.0"
+  "devDependencies": {
+    "nodemon": "^3.1.4"
   }
 }
