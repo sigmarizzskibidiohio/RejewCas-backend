@@ -31,7 +31,7 @@ function initUser(userId, username, nickname) {
 }
 
 // 1. Синхронизация и получение профиля
-app.post('/api/user', (req, require) => {
+app.post('/api/user', (req, res) => { // <-- вот так четко
     const { userId, username, nickname } = req.body;
     if (!userId) return res.status(400).json({ error: "Missing userId" });
     
