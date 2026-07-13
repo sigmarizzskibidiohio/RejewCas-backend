@@ -10,40 +10,56 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// БЕССМЕРТНОЕ ОБЛАЧНОЕ JSON ХРАНИЛИЩЕ (KVDB.IO)
+// НАСТРОЙКА БЕЗЛИМИТНОЙ БАЗЫ SUPABASE
 // ==========================================
-const KVDB_BUCKET_ID = '5mTLLiyYaFAK8D3K2o2PyP'; 
-const KVDB_URL = `https://kvdb.io/${KVDB_BUCKET_ID}/db_file`;
+const SUPABASE_URL = 'https://tponufkikktrosxrgraz.supabase.co';
+const SUPABASE_KEY = 'sb_secret_R6cj-LP93g28zplARQu8Ug_iK5-wJNr';
+
+// Ссылка на конкретную строчку с нашим JSON файлом в таблице database
+const DB_ENDPOINT = `${SUPABASE_URL}/rest/v1/database?key=eq.users_file`;
 
 let users = {};
-let isDirty = false; 
+let isDirty = false;
 
+// Загрузка базы данных из Supabase при старте или просыпании Render
 async function loadDatabase() {
     try {
-        const response = await axios.get(KVDB_URL);
-        users = response.data || {};
-        console.log(`[Облако DB] Успешно скачано профилей: ${Object.keys(users).length}`);
-    } catch (error) {
-        if (error.response && error.response.status === 404) {
-            console.log('[Облако DB] База пустая. Инициализируем чистый JSON.');
+        const response = await axios.get(DB_ENDPOINT, {
+            headers: {
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`
+            }
+        });
+        
+        if (response.data && response.data.length > 0) {
+            users = response.data[0].data || {};
+            console.log(`[Supabase DB] Успешно скачано профилей: ${Object.keys(users).length}`);
+        } else {
+            console.log('[Supabase DB] База пустая в таблице. Инициализируем чистый JSON.');
             users = {};
             isDirty = true;
             await saveDatabaseNow();
-        } else {
-            console.error('[Облако DB] Ошибка подключения к kvdb:', error.message);
         }
+    } catch (error) {
+        console.error('[Supabase DB] Критическая ошибка подключения:', error.message);
     }
 }
 
+// Принудительное сохранение в облако Supabase
 async function saveDatabaseNow() {
     try {
-        await axios.put(KVDB_URL, users, {
-            headers: { 'Content-Type': 'application/json' }
+        await axios.patch(DB_ENDPOINT, { data: users }, {
+            headers: {
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`,
+                'Content-Type': 'application/json',
+                'Prefer': 'return=minimal'
+            }
         });
         isDirty = false;
-        console.log('[Облако DB] Изменения успешно перезаписаны в JSON на kvdb.io!');
+        console.log('[Supabase DB] Изменения успешно синхронизированы в PostgreSQL!');
     } catch (error) {
-        console.error('[Облако DB] Ошибка сохранения данных в облако:', error.message);
+        console.error('[Supabase DB] Ошибка сохранения данных:', error.message);
     }
 }
 
@@ -51,12 +67,14 @@ function queueSave() {
     isDirty = true;
 }
 
+// Проверка авто-сейва каждые 5 секунд
 setInterval(async () => {
     if (isDirty) {
         await saveDatabaseNow();
     }
 }, 5000);
 
+// Инициализация юзера
 function initUser(userId, username, nickname) {
     const sId = String(userId);
     const cleanUsername = String(username || 'player').toLowerCase().replace('@', '').trim();
@@ -95,7 +113,6 @@ app.post('/api/user', async (req, res) => {
     res.json(user);
 });
 
-// ТОТ САМЫЙ КРИТИЧЕСКИЙ ЭНДПОИНТ ДЛЯ СЛОТОВ, КЛИКЕРА И РАКЕТКИ
 app.post('/api/game/result', async (req, res) => {
     const { userId, bet, winAmount, isWin } = req.body;
     const user = users[String(userId)];
@@ -104,20 +121,17 @@ app.post('/api/game/result', async (req, res) => {
     const intBet = parseInt(bet || 0);
     const intWin = parseInt(winAmount || 0);
 
-    // Обновляем баланс игрока
     user.balance = user.balance - intBet + intWin;
 
-    // Считаем стату (кликер с bet: 0 не учитываем в лудоманскую статистику)
     if (intBet > 0) {
         user.stats.total += 1;
-        if (isWin) user.shadow = user.stats.wins += 1; else user.stats.losses += 1;
+        if (isWin) user.stats.wins += 1; else user.stats.losses += 1;
     }
 
     queueSave();
     res.json(user);
 });
 
-// ПЕРЕВОДЫ REJEWPAY
 app.post('/api/rejewpay/transfer', async (req, res) => {
     const { senderId, receiverUsername, amount } = req.body;
     
@@ -151,7 +165,6 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     res.json({ success: true, newBalance: sender.balance });
 });
 
-// МАРКЕТ
 app.post('/api/buy', async (req, res) => {
     const { userId, itemId, itemName, cost, type } = req.body;
     const user = users[String(userId)];
@@ -172,7 +185,6 @@ app.post('/api/buy', async (req, res) => {
     res.json(user);
 });
 
-// ПЛИНКО
 app.post('/api/games/plinko', async (req, res) => {
     const { tgId, bet } = req.body;
     const user = users[String(tgId)];
@@ -192,7 +204,6 @@ app.post('/api/games/plinko', async (req, res) => {
     res.json({ bucketIndex, multiplier, winAmount, newBalance: user.balance });
 });
 
-// АДМИНКА
 app.post('/api/admin/add', async (req, res) => {
     const { targetUserId, amount } = req.body;
     const user = users[String(targetUserId)];
@@ -206,7 +217,7 @@ app.post('/api/admin/add', async (req, res) => {
 app.listen(PORT, async () => {
     console.log(`==================================================`);
     console.log(` Бэк RejewCas успешно запущен на порту: ${PORT}`);
-    console.log(` База данных привязана к ключу: ${KVDB_BUCKET_ID}`);
+    console.log(` Хранилище переключено на бессмертный Supabase DB`);
     console.log(`==================================================`);
     await loadDatabase();
 });
