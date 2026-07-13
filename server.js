@@ -6,6 +6,11 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// ==========================================
+// ТОКЕН ТВОЕГО БОТА (ВСТАВЬ СВОЙ!)
+// ==========================================
+const BOT_TOKEN = '8700139578:AAHqYBF2TTDHlwgBcgQQ76ekah0pGoqeFj4';
+
 app.use(cors());
 app.use(express.json());
 
@@ -141,7 +146,8 @@ app.post('/api/game/result', async (req, res) => {
 
 // ПЕРЕВОДЫ REJEWPAY
 app.post('/api/rejewpay/transfer', async (req, res) => {
-    const { senderId, tgId, receiverUsername, amount } = req.body;
+    // ДОБАВИЛ comment В ИЗВЛЕЧЕНИЕ ДАННЫХ
+    const { senderId, tgId, receiverUsername, amount, comment } = req.body;
     const finalSenderId = String(senderId || tgId);
     
     const sender = users[finalSenderId];
@@ -169,6 +175,25 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     };
     sender.messages.push({ ...transferLog, type: 'transfer_out', partnerNickname: receiver.nickname });
     receiver.messages.push({ ...transferLog, type: 'transfer_in', partnerNickname: sender.nickname });
+
+    // --- БЛОК УВЕДОМЛЕНИЯ В ТГ ---
+    try {
+        const tgProfileLink = `tg://user?id=${sender.userId}`;
+        const messageText = `<b>💸 Новый перевод в RejewPay!</b>\n\n` +
+                            `<b>👤 Отправитель:</b> <a href="${tgProfileLink}">${sender.nickname}</a>\n` +
+                            `<b>💰 Сумма:</b> ${intAmount.toLocaleString()} $RJC\n` +
+                            `<b>💬 Комментарий:</b> ${comment ? comment : '<i>Без комментария</i>'}`;
+
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            chat_id: receiver.userId,
+            text: messageText,
+            parse_mode: 'HTML',
+            disable_web_page_preview: true
+        });
+    } catch (e) {
+        console.error("Бот не смог отправить уведомление в ТГ:", e.message);
+    }
+    // ----------------------------
 
     queueSave(); 
     res.json({ success: true, newBalance: sender.balance });
