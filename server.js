@@ -1,195 +1,225 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
+const axios = require('axios');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
-// Временная база данных в оперативе (после перезапуска сервера сбросится)
-// Для продакшна потом прикрутишь MongoDB/PostgreSQL, а пока для тестов самое оно
+// ==========================================
+// БЕССМЕРТНОЕ ОБЛАЧНОЕ JSON ХРАНИЛИЩЕ (ТВОЙ БАКЕТ)
+// ==========================================
+const KVDB_BUCKET_ID = 'AHkNCjefJ5mgtXCZxuzFq9'; 
+const KVDB_URL = `https://kvdb.io/${KVDB_BUCKET_ID}/users_database`;
+
 let users = {};
 
-// Массив множителей для Плинко (8 линий = 9 лунок)
-const plinkoMultipliers = [5.6, 1.6, 1.1, 0.6, 0.3, 0.6, 1.1, 1.6, 5.6];
+// Загрузка базы данных из облака при старте или просыпании Render
+async function loadDatabase() {
+    try {
+        const response = await axios.get(KVDB_URL);
+        users = response.data || {};
+        console.log(`[Облако DB] Успешно скачано профилей: ${Object.keys(users).length}`);
+    } catch (error) {
+        if (error.response && error.response.status === 404) {
+            console.log('[Облако DB] База пустая, инициализируем чистый JSON.');
+            users = {};
+            await saveDatabase();
+        } else {
+            console.error('[Облако DB] Ошибка подключения к kvdb:', error.message);
+        }
+    }
+}
 
-// Вспомогательная функция для создания дефолтного юзера
+// Сохранение измененного JSON обратно в облако
+async function saveDatabase() {
+    try {
+        await axios.put(KVDB_URL, users);
+        console.log('[Облако DB] Изменения успешно перезаписаны в JSON!');
+    } catch (error) {
+        console.error('[Облако DB] Ошибка при сохранении JSON в облако:', error.message);
+    }
+}
+
+// Инициализация юзера
 function initUser(userId, username, nickname) {
-    if (!users[userId]) {
-        users[userId] = {
-            userId: String(userId),
-            username: String(username || 'player').toLowerCase().replace('@', ''),
+    const sId = String(userId);
+    const cleanUsername = String(username || 'player').toLowerCase().replace('@', '').trim();
+    
+    if (!users[sId]) {
+        users[sId] = {
+            userId: sId,
+            username: cleanUsername,
             nickname: String(nickname || username || 'Игрок'),
-            balance: 5000, // Стартовый капитал
+            balance: 5000,
             currentCitizenship: 'Без гражданства',
             ownedProperties: [],
             stats: { total: 0, wins: 0, losses: 0 },
-            messages: []
+            messages: [],       // Логи переводов RejewPay
+            gameHistory: [],    // Логи игр
+            activeCrashRound: null
         };
+        saveDatabase(); 
+    } else if (username && users[sId].username !== cleanUsername) {
+        users[sId].username = cleanUsername;
+        saveDatabase();
     }
-    return users[userId];
+    return users[sId];
 }
 
-// 1. Синхронизация и получение профиля
-app.post('/api/user', (req, res) => { // <-- вот так четко
+const SLOT_ITEMS = ['🍒', '🍋', '🍇', '💎', '7️⃣'];
+const PLINKO_MULTIPLIERS = [5.6, 1.6, 1.1, 0.6, 0.3, 0.6, 1.1, 1.6, 5.6];
+
+// ==========================================
+// API ЭНДПОИНТЫ
+// ==========================================
+
+app.post('/api/user', async (req, res) => {
     const { userId, username, nickname } = req.body;
-    if (!userId) return res.status(400).json({ error: "Missing userId" });
+    if (!userId) return res.status(400).json({ error: "Пустой userId" });
     
     const user = initUser(userId, username, nickname);
     res.json(user);
 });
 
-// 2. Обработка Плинко (Честный бэк-обсчет)
-app.post('/api/games/plinko', (req, res) => {
-    const { tgId, bet } = req.body;
-    const user = users[String(tgId)];
-
-    if (!user) return res.status(404).json({ error: "Пользователь не найден" });
-    if (isNaN(bet) || bet < 10) return res.status(400).json({ error: "Минимальная ставка — 10 $RJC" });
-    if (user.balance < bet) return res.status(400).json({ error: "Недостаточно баланса" });
-
-    // Симулируем 8 рядов колышков. На каждом ряду шарик падает либо влево (0), либо вправо (1)
-    let bucketIndex = 0;
-    for (let i = 0; i < 8; i++) {
-        if (Math.random() > 0.5) {
-            bucketIndex++;
-        }
-    }
-
-    const multiplier = plinkoMultipliers[bucketIndex];
-    const winAmount = Math.floor(bet * multiplier);
-    
-    // Обновляем баланс и стату
-    user.balance = user.balance - bet + winAmount;
-    user.stats.total += 1;
-    if (multiplier >= 1) {
-        user.stats.wins += 1;
-    } else {
-        user.stats.losses += 1;
-    }
-
-    res.json({
-        bucketIndex: bucketIndex,
-        multiplier: multiplier,
-        winAmount: winAmount,
-        newBalance: user.balance
-    });
-});
-
-// 3. Обновленная система переводов RejewPay (Поиск по Username)
-app.post('/api/rejewpay/transfer', (req, res) => {
-    const { senderId, receiverUsername, amount } = req.body;
+// ПЕРЕВОДЫ REJEWPAY С ПЕРЕЗАПИСЬЮ ЗНАЧЕНИЙ В JSON
+app.post('/api/rejewpay/transfer', async (req, res) => {
+    const { senderId, receiverUsername, amount, comment } = req.body;
     
     const sender = users[String(senderId)];
-    if (!sender) return res.status(404).json({ error: "Отправитель не авторизован" });
-    if (isNaN(amount) || amount <= 0) return res.status(400).json({ error: "Некорректная сумма перевода" });
-    if (sender.balance < amount) return res.status(400).json({ error: "Недостаточно коинов на балансе" });
+    if (!sender) return res.status(404).json({ error: "Отправитель не найден" });
+    
+    const intAmount = parseInt(amount);
+    if (isNaN(intAmount) || intAmount <= 0) return res.status(400).json({ error: "Неверная сумма" });
+    if (sender.balance < intAmount) return res.status(400).json({ error: "Недостаточно средств" });
 
     const cleanReceiverUsername = String(receiverUsername).toLowerCase().replace('@', '').trim();
-    
-    // Ищем получателя по его юзернейму в нашей базе
     const receiver = Object.values(users).find(u => u.username === cleanReceiverUsername);
-    if (!receiver) {
-        return res.status(404).json({ error: `Юзер @${cleanReceiverUsername} еще ни разу не заходил в бота` });
-    }
-
-    if (sender.userId === receiver.userId) {
-        return res.status(400).json({ error: "Нельзя переводить коины самому себе, не тупи" });
-    }
-
-    // Проводим транзакцию
-    sender.balance -= amount;
-    receiver.balance += amount;
-
-    // Пишем логи в историю обоим участникам
-    const txIndex = Date.now();
     
-    sender.messages.push({
-        id: `tx_${txIndex}_out`,
-        amount: amount,
-        senderId: sender.userId,
-        senderUsername: sender.username,
-        receiverUsername: receiver.username,
-        partnerNickname: receiver.nickname,
-        fromId: sender.userId,
-        from: sender.nickname
-    });
+    if (!receiver) return res.status(404).json({ error: `Юзер @${cleanReceiverUsername} не найден` });
+    if (sender.userId === receiver.userId) return res.status(400).json({ error: "Нельзя переводить себе" });
 
-    receiver.messages.push({
-        id: `tx_${txIndex}_in`,
-        amount: amount,
-        senderId: sender.userId,
-        senderUsername: sender.username,
-        receiverUsername: receiver.username,
-        partnerNickname: sender.nickname,
-        fromId: sender.userId,
-        from: sender.nickname
-    });
+    const finalComment = comment && comment.trim().length > 0 ? comment.trim() : "Без комментария";
+    const transactionId = `TX-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    const timestamp = new Date().toISOString();
 
-    res.json({ success: true, newBalance: sender.balance });
+    // Меняем значения прямо в структуре JSON
+    sender.balance -= intAmount;
+    receiver.balance += intAmount;
+
+    // Записываем историю перевода внутрь профилей
+    const transferLog = {
+        id: transactionId, amount: intAmount, comment: finalComment, timestamp,
+        senderUsername: sender.username, receiverUsername: receiver.username
+    };
+    sender.messages.push({ ...transferLog, type: 'transfer_out', partnerNickname: receiver.nickname });
+    receiver.messages.push({ ...transferLog, type: 'transfer_in', partnerNickname: sender.nickname });
+
+    // Пушим обновленный JSON в облако
+    await saveDatabase();
+
+    res.json({ success: true, newBalance: sender.balance, transactionId });
 });
 
-// 4. Результаты остальных игр (Слоты, Краш, Кликкер)
-app.post('/api/game/result', (req, res) => {
-    const { userId, bet, winAmount, isWin } = req.body;
-    const user = users[String(userId)];
-    
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    if (bet === 0) {
-        // Это тупо кликер (майнинг)
-        user.balance += winAmount;
-    } else {
-        // Обычные режимы ставок
-        user.balance = user.balance - bet + winAmount;
-        user.stats.total += 1;
-        if (isWin) user.stats.wins += 1;
-        else user.stats.losses += 1;
-    }
-
-    res.json(user);
-});
-
-// 5. Покупка имущества и паспортов в маркете
-app.post('/api/buy', (req, res) => {
+// МАГАЗИН: ИГРОК ПОКУПАЕТ -> СЕРВЕР МЕНЯЕТ ЗНАЧЕНИЯ В JSON
+app.post('/api/buy', async (req, res) => {
     const { userId, itemId, itemName, cost, type } = req.body;
     const user = users[String(userId)];
+    
+    if (!user) return res.status(404).json({ error: "Юзер не найден" });
+    const intCost = parseInt(cost);
+    if (user.balance < intCost) return res.status(400).json({ error: "Не хватает коинов" });
 
-    if (!user) return res.status(404).json({ error: "User not found" });
-    if (user.balance < cost) return res.status(400).json({ error: "Мало золотишка" });
-
-    user.balance -= cost;
-
+    // Сервер меняет значения в JSON файле
+    user.balance -= intCost;
+    if (!user.ownedProperties.includes(itemId)) {
+        user.ownedProperties.push(itemId);
+    }
     if (type === 'citizen') {
         user.currentCitizenship = itemName;
-    } else {
-        if (!user.ownedProperties.includes(itemId)) {
-            user.ownedProperties.push(itemId);
-        }
     }
 
+    user.gameHistory.push({
+        game: 'market',
+        bet: intCost,
+        winAmount: 0,
+        isWin: true,
+        details: `Покупка товара: ${itemName}`,
+        timestamp: new Date().toISOString()
+    });
+
+    await saveDatabase();
     res.json(user);
 });
 
-// 6. Админ-панель (Накачка баланса)
-app.post('/api/admin/add', (req, res) => {
-    const { adminUserId, targetUserId, amount } = req.body;
-    
-    // Проверяем, является ли отправитель админом (дублируем логику фронта)
-    const adminUser = users[String(adminUserId)];
-    const allowed = ['root', 'tacuv', 'rejew'];
-    
-    if (!adminUser || !allowed.includes(adminUser.username)) {
-        return res.status(403).json({ error: "Куда лезешь? Доступ запрещен." });
+// Игры: Слоты (Спины)
+app.post('/api/games/slots', async (req, res) => {
+    const { userId, bet } = req.body;
+    const user = users[String(userId)];
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const intBet = parseInt(bet);
+    if (user.balance < intBet) return res.status(400).json({ error: "Недостаточно средств" });
+
+    let rng = Math.random() * 100;
+    let r1, r2, r3, winAmount = 0, isWin = false;
+
+    if (rng < 8.0) { 
+        r1 = r2 = r3 = '💎'; winAmount = intBet * 10; isWin = true;
+    } else if (rng < 35.0) { 
+        r1 = r2 = SLOT_ITEMS[Math.floor(Math.random() * 3)]; r3 = SLOT_ITEMS[4];
+        winAmount = Math.floor(intBet * 1.5); isWin = true;
+    } else { 
+        r1 = '🍒'; r2 = '🍇'; r3 = '7️⃣';
     }
 
-    const target = users[String(targetUserId)];
-    if (!target) return res.status(404).json({ error: "Целевой юзер не найден" });
+    user.balance = user.balance - intBet + winAmount;
+    user.stats.total += 1;
+    if (isWin) user.stats.wins += 1; else user.stats.losses += 1;
 
-    target.balance += parseInt(amount);
+    await saveDatabase();
+    res.json({ r1, r2, r3, winAmount, isWin, newBalance: user.balance });
+});
+
+// Игры: Плинко
+app.post('/api/games/plinko', async (req, res) => {
+    const { tgId, bet } = req.body;
+    const user = users[String(tgId)];
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const intBet = parseInt(bet);
+    if (user.balance < intBet) return res.status(400).json({ error: "Недостаточно баланса" });
+
+    let bucketIndex = 0;
+    for (let i = 0; i < 8; i++) { if (Math.random() > 0.5) bucketIndex++; }
+    const multiplier = PLINKO_MULTIPLIERS[bucketIndex];
+    const winAmount = Math.floor(intBet * multiplier);
+    
+    user.balance = user.balance - intBet + winAmount;
+    await saveDatabase();
+    
+    res.json({ bucketIndex, multiplier, winAmount, newBalance: user.balance });
+});
+
+// Админка надува баланса
+app.post('/api/admin/add', async (req, res) => {
+    const { targetUserId, amount } = req.body;
+    const user = users[String(targetUserId)];
+    if (!user) return res.status(404).json({ error: "User not found" });
+    
+    user.balance += parseInt(amount || 0);
+    await saveDatabase();
     res.json({ success: true });
 });
 
-app.listen(PORT, () => {
-    console.log(`Бэкенд RejewCas пашет на порту ${PORT}`);
+// Стартуем сервер и качаем базу
+app.listen(PORT, async () => {
+    console.log(`==================================================`);
+    console.log(` Бэк RejewCas успешно запущен на порту: ${PORT}`);
+    console.log(` Хранилище подключено к контейнеру: ${KVDB_BUCKET_ID}`);
+    console.log(`==================================================`);
+    await loadDatabase();
 });
