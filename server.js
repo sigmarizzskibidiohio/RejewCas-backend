@@ -74,14 +74,14 @@ setInterval(async () => {
     }
 }, 5000);
 
-// Инициализация юзера
-function initUser(userId, username, nickname) {
-    const sId = String(userId);
+// Инициализация юзера (принимает любые варианты ID)
+function initUser(userId, tgId, username, nickname) {
+    const finalId = String(userId || tgId);
     const cleanUsername = String(username || 'player').toLowerCase().replace('@', '').trim();
     
-    if (!users[sId]) {
-        users[sId] = {
-            userId: sId,
+    if (!users[finalId]) {
+        users[finalId] = {
+            userId: finalId,
             username: cleanUsername,
             nickname: String(nickname || username || 'Игрок'),
             balance: 5000,
@@ -92,11 +92,11 @@ function initUser(userId, username, nickname) {
             gameHistory: []
         };
         queueSave(); 
-    } else if (username && users[sId].username !== cleanUsername) {
-        users[sId].username = cleanUsername;
+    } else if (username && users[finalId].username !== cleanUsername) {
+        users[finalId].username = cleanUsername;
         queueSave();
     }
-    return users[sId];
+    return users[finalId];
 }
 
 const PLINKO_MULTIPLIERS = [5.6, 1.6, 1.1, 0.6, 0.3, 0.6, 1.1, 1.6, 5.6];
@@ -105,24 +105,31 @@ const PLINKO_MULTIPLIERS = [5.6, 1.6, 1.1, 0.6, 0.3, 0.6, 1.1, 1.6, 5.6];
 // API ЭНДПОИНТЫ
 // ==========================================
 
+// Авторизация / Вход юзера
 app.post('/api/user', async (req, res) => {
-    const { userId, username, nickname } = req.body;
-    if (!userId) return res.status(400).json({ error: "Пустой userId" });
+    const { userId, tgId, username, nickname } = req.body;
+    const finalId = userId || tgId;
+    if (!finalId) return res.status(400).json({ error: "Пустой userId или tgId" });
     
-    const user = initUser(userId, username, nickname);
+    const user = initUser(userId, tgId, username, nickname);
     res.json(user);
 });
 
+// УНИВЕРСАЛЬНЫЙ РАСЧЕТ ИГР (Слоты, Ракетка, Кликер)
 app.post('/api/game/result', async (req, res) => {
-    const { userId, bet, winAmount, isWin } = req.body;
-    const user = users[String(userId)];
-    if (!user) return res.status(404).json({ error: "Юзер не найден" });
+    const { userId, tgId, bet, winAmount, isWin } = req.body;
+    const finalId = String(userId || tgId);
+    
+    const user = users[finalId];
+    if (!user) return res.status(404).json({ error: `Юзер ${finalId} не найден` });
 
     const intBet = parseInt(bet || 0);
     const intWin = parseInt(winAmount || 0);
 
+    // Считаем новый баланс
     user.balance = user.balance - intBet + intWin;
 
+    // Обновляем стату (для нормальных игр со ставками)
     if (intBet > 0) {
         user.stats.total += 1;
         if (isWin) user.stats.wins += 1; else user.stats.losses += 1;
@@ -132,10 +139,12 @@ app.post('/api/game/result', async (req, res) => {
     res.json(user);
 });
 
+// ПЕРЕВОДЫ REJEWPAY
 app.post('/api/rejewpay/transfer', async (req, res) => {
-    const { senderId, receiverUsername, amount } = req.body;
+    const { senderId, tgId, receiverUsername, amount } = req.body;
+    const finalSenderId = String(senderId || tgId);
     
-    const sender = users[String(senderId)];
+    const sender = users[finalSenderId];
     if (!sender) return res.status(404).json({ error: "Отправитель не найден" });
     
     const intAmount = parseInt(amount);
@@ -165,11 +174,14 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     res.json({ success: true, newBalance: sender.balance });
 });
 
+// МАГАЗИН КАЗИНО
 app.post('/api/buy', async (req, res) => {
-    const { userId, itemId, itemName, cost, type } = req.body;
-    const user = users[String(userId)];
+    const { userId, tgId, itemId, itemName, cost, type } = req.body;
+    const finalId = String(userId || tgId);
     
+    const user = users[finalId];
     if (!user) return res.status(404).json({ error: "Юзер не найден" });
+    
     const intCost = parseInt(cost);
     if (user.balance < intCost) return res.status(400).json({ error: "Не хватает коинов" });
 
@@ -185,10 +197,13 @@ app.post('/api/buy', async (req, res) => {
     res.json(user);
 });
 
+// ПЛИНКО
 app.post('/api/games/plinko', async (req, res) => {
-    const { tgId, bet } = req.body;
-    const user = users[String(tgId)];
-    if (!user) return res.status(404).json({ error: "User not found" });
+    const { userId, tgId, bet } = req.body;
+    const finalId = String(userId || tgId);
+
+    const user = users[finalId];
+    if (!user) return res.status(404).json({ error: `Юзер ${finalId} не найден в Плинко` });
 
     const intBet = parseInt(bet);
     if (user.balance < intBet) return res.status(400).json({ error: "Недостаточно баланса" });
@@ -204,6 +219,7 @@ app.post('/api/games/plinko', async (req, res) => {
     res.json({ bucketIndex, multiplier, winAmount, newBalance: user.balance });
 });
 
+// АДМИНКА ДЛЯ НАДУВА БАЛАНСА
 app.post('/api/admin/add', async (req, res) => {
     const { targetUserId, amount } = req.body;
     const user = users[String(targetUserId)];
