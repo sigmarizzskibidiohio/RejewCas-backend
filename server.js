@@ -36,14 +36,13 @@ async function loadDatabase() {
         
         if (response.data && response.data.length > 0) {
             users = response.data[0].data || {};
-            // Гарантируем наличие системной ветки промокодов в объекте базы
-            if (!users._promocodes) {
-                users._promocodes = {};
-            }
+            // Гарантируем наличие системных веток
+            if (!users._promocodes) users._promocodes = {};
+            if (!users._maintenance) users._maintenance = { enabled: false };
             console.log(`[Supabase DB] Успешно скачано профилей: ${Object.keys(users).length}`);
         } else {
             console.log('[Supabase DB] База пустая в таблице. Инициализируем чистый JSON.');
-            users = { _promocodes: {} };
+            users = { _promocodes: {}, _maintenance: { enabled: false } };
             isDirty = true;
             await saveDatabaseNow();
         }
@@ -106,7 +105,7 @@ function initUser(userId, tgId, username, nickname) {
 const PLINKO_MULTIPLIERS = [5.6, 1.6, 1.1, 0.6, 0.3, 0.6, 1.1, 1.6, 5.6];
 
 // ==========================================
-// TELEGRAM BOT POLLING ENGINE (ОБРАБОТКА КОМАНД)
+// TELEGRAM BOT POLLING ENGINE (+РАССЫЛКА /NEW)
 // ==========================================
 let lastUpdateId = 0;
 
@@ -124,10 +123,62 @@ async function startBotPolling() {
                     lastUpdateId = update.update_id;
                     
                     if (update.message && update.message.text) {
-                        const text = update.message.text.trim().toLowerCase();
+                        const rawText = update.message.text.trim();
+                        const text = rawText.toLowerCase();
                         const chatId = update.message.chat.id;
                         const tgIdStr = String(update.message.from.id);
+                        const rawUsername = String(update.message.from.username || '').toLowerCase().replace('@', '');
                         
+                        // Проверка админских прав по юзернейму для рассылки
+                        const isAdmin = ['root', 'tacuv', 'rejew'].includes(rawUsername);
+
+                        // 3. ФУНКЦИЯ РАССЫЛКИ ОБНОВЛЕНИЙ ПО КОМАНДЕ /new
+                        if (rawText.startsWith('/new ') || rawText.startsWith('/new\n')) {
+                            if (!isAdmin) {
+                                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                                    chat_id: chatId,
+                                    text: `❌ У тебя нет прав разработчика для вещания обновлений.`
+                                });
+                                continue;
+                            }
+
+                            const updateContent = rawText.substring(5).trim();
+                            if (!updateContent) {
+                                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                                    chat_id: chatId,
+                                    text: `⚠️ Нельзя отправить пустое обновление. Пример: /new Пацаны, завезли новый Плинко!`
+                                });
+                                continue;
+                            }
+
+                            console.log(`[Admin Broadcast] Запущена массовая рассылка: "${updateContent}"`);
+                            
+                            // Вытаскиваем всех реальных людей (отсекаем системные ключи)
+                            const targetUsers = Object.keys(users).filter(key => !key.startsWith('_'));
+                            let successCount = 0;
+
+                            for (const targetId of targetUsers) {
+                                try {
+                                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                                        chat_id: targetId,
+                                        text: `📢 <b>ОБНОВЛЕНИЕ В REJEWCAS!</b>\n\n${updateContent}`,
+                                        parse_mode: 'HTML'
+                                    });
+                                    successCount++;
+                                    // Крошечный тайм-аут, чтобы Телеграм не выдал Flood Control
+                                    await new Promise(res => setTimeout(res, 50));
+                                } catch (err) {
+                                    console.error(`Не удалось отправить рассылку для ID ${targetId}`);
+                                }
+                            }
+
+                            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                                chat_id: chatId,
+                                text: `✅ Рассылка завершена! Успешно доставлено: ${successCount} пользователям.`
+                            });
+                            continue;
+                        }
+
                         if (['баланс', 'б', 'балик'].includes(text)) {
                             const user = users[tgIdStr] || initUser(tgIdStr, tgIdStr, update.message.from.username, update.message.from.first_name);
                             
@@ -161,7 +212,24 @@ app.post('/api/user', async (req, res) => {
     if (!finalId) return res.status(400).json({ error: "Пустой userId или tgId" });
     
     const user = initUser(userId, tgId, username, nickname);
-    res.json(user);
+    
+    // Подмешиваем глобальный флаг техобслуживания
+    const isMaintenance = users._maintenance ? users._maintenance.enabled : false;
+    res.json({ ...user, maintenanceActive: isMaintenance });
+});
+
+// 4. ЭНДПОИНТ ДЛЯ ОДНОКНОПОЧНОГО УПРАВЛЕНИЯ ТЕХОБСЛУЖИВАНИЕМ
+app.post('/api/admin/maintenance/toggle', async (req, res) => {
+    if (!users._maintenance) {
+        users._maintenance = { enabled: false };
+    }
+    
+    // Переключаем триггер
+    users._maintenance.enabled = !users._maintenance.enabled;
+    queueSave();
+    
+    console.log(`[Admin Panel] Статус техобслуживания изменен на: ${users._maintenance.enabled}`);
+    res.json({ success: true, maintenanceActive: users._maintenance.enabled });
 });
 
 app.post('/api/game/result', async (req, res) => {
@@ -197,7 +265,6 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     if (sender.balance < intAmount) return res.status(400).json({ error: "Недостаточно средств" });
 
     const cleanReceiverUsername = String(receiverUsername).toLowerCase().replace('@', '').trim();
-    // Исключаем системный ключ _promocodes из глобального поиска юзеров
     const receiver = Object.values(users).find(u => u && u.username === cleanReceiverUsername);
     
     if (!receiver) return res.status(404).json({ error: `Юзер @${cleanReceiverUsername} не найден` });
@@ -290,22 +357,13 @@ app.post('/api/admin/add', async (req, res) => {
     res.json({ success: true });
 });
 
-// ==========================================
-// НОВЫЕ ЭНДПОИНТЫ ДЛЯ СИСТЕМЫ ПРОМОКОДОВ
-// ==========================================
-
-// 1. Создание промокода (Админ-панель)
 app.post('/api/admin/promo/create', async (req, res) => {
     const { code, limit, reward } = req.body;
-    
-    if (!users._promocodes) {
-        users._promocodes = {};
-    }
+    if (!users._promocodes) users._promocodes = {};
 
     const cleanCode = String(code).trim().toUpperCase();
     if (!cleanCode) return res.status(400).json({ error: "Недопустимое имя промокода" });
 
-    // Сохраняем настройки промокода прямо в общий JSON-объект базы
     users._promocodes[cleanCode] = {
         code: cleanCode,
         maxActivations: parseInt(limit) || 1,
@@ -315,51 +373,33 @@ app.post('/api/admin/promo/create', async (req, res) => {
     };
 
     queueSave();
-    console.log(`[Promo Engine] Создан промокод: ${cleanCode} (Лимит: ${limit}, Бонус: ${reward})`);
     res.json({ success: true });
 });
 
-// 2. Активация промокода игроком
 app.post('/api/promo/activate', async (req, res) => {
     const { userId, code } = req.body;
     const finalId = String(userId);
 
     const user = users[finalId];
     if (!user) return res.status(404).json({ error: "Пользователь не авторизован" });
-
-    if (!users._promocodes) {
-        users._promocodes = {};
-    }
+    if (!users._promocodes) users._promocodes = {};
 
     const cleanCode = String(code).trim().toUpperCase();
     const promo = users._promocodes[cleanCode];
 
-    if (!promo) {
-        return res.status(404).json({ error: "Такого промокода не существует!" });
-    }
+    if (!promo) return res.status(404).json({ error: "Такого промокода не существует!" });
+    if (promo.currentActivations >= promo.maxActivations) return res.status(400).json({ error: "Этот промокод уже закончился!" });
+    if (promo.activatedBy.includes(finalId)) return res.status(400).json({ error: "Ты уже активировал этот промокод!" });
 
-    if (promo.currentActivations >= promo.maxActivations) {
-        return res.status(400).json({ error: "Этот промокод уже закончился!" });
-    }
-
-    if (promo.activatedBy.includes(finalId)) {
-        return res.status(400).json({ error: "Ты уже активировал этот промокод!" });
-    }
-
-    // Процесс начисления
     promo.currentActivations += 1;
     promo.activatedBy.push(finalId);
     user.balance += promo.reward;
 
-    // Записываем лог в историю транзакций юзера для красоты интерфейса
     const transactionId = `PR-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
     user.messages.push({
-        id: transactionId,
-        amount: promo.reward,
-        timestamp: new Date().toISOString(),
-        type: 'promo_bonus',
-        partnerNickname: 'Система бонусов',
-        senderUsername: 'SYSTEM',
+        id: transactionId, amount: promo.reward,
+        timestamp: new Date().toISOString(), type: 'promo_bonus',
+        partnerNickname: 'Система бонусов', senderUsername: 'SYSTEM',
         comment: `Активация промокода: ${cleanCode}`
     });
 
