@@ -36,10 +36,14 @@ async function loadDatabase() {
         
         if (response.data && response.data.length > 0) {
             users = response.data[0].data || {};
+            // Гарантируем наличие системной ветки промокодов в объекте базы
+            if (!users._promocodes) {
+                users._promocodes = {};
+            }
             console.log(`[Supabase DB] Успешно скачано профилей: ${Object.keys(users).length}`);
         } else {
             console.log('[Supabase DB] База пустая в таблице. Инициализируем чистый JSON.');
-            users = {};
+            users = { _promocodes: {} };
             isDirty = true;
             await saveDatabaseNow();
         }
@@ -124,9 +128,7 @@ async function startBotPolling() {
                         const chatId = update.message.chat.id;
                         const tgIdStr = String(update.message.from.id);
                         
-                        // Проверяем триггеры на баланс
                         if (['баланс', 'б', 'балик'].includes(text)) {
-                            // Находим или создаем юзера на лету
                             const user = users[tgIdStr] || initUser(tgIdStr, tgIdStr, update.message.from.username, update.message.from.first_name);
                             
                             const messageText = `<b>💳 Твой игровой баланс:</b> ${user.balance.toLocaleString()} $RJC\n` +
@@ -195,7 +197,8 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     if (sender.balance < intAmount) return res.status(400).json({ error: "Недостаточно средств" });
 
     const cleanReceiverUsername = String(receiverUsername).toLowerCase().replace('@', '').trim();
-    const receiver = Object.values(users).find(u => u.username === cleanReceiverUsername);
+    // Исключаем системный ключ _promocodes из глобального поиска юзеров
+    const receiver = Object.values(users).find(u => u && u.username === cleanReceiverUsername);
     
     if (!receiver) return res.status(404).json({ error: `Юзер @${cleanReceiverUsername} не найден` });
     if (sender.userId === receiver.userId) return res.status(400).json({ error: "Нельзя переводить себе" });
@@ -287,11 +290,88 @@ app.post('/api/admin/add', async (req, res) => {
     res.json({ success: true });
 });
 
+// ==========================================
+// НОВЫЕ ЭНДПОИНТЫ ДЛЯ СИСТЕМЫ ПРОМОКОДОВ
+// ==========================================
+
+// 1. Создание промокода (Админ-панель)
+app.post('/api/admin/promo/create', async (req, res) => {
+    const { code, limit, reward } = req.body;
+    
+    if (!users._promocodes) {
+        users._promocodes = {};
+    }
+
+    const cleanCode = String(code).trim().toUpperCase();
+    if (!cleanCode) return res.status(400).json({ error: "Недопустимое имя промокода" });
+
+    // Сохраняем настройки промокода прямо в общий JSON-объект базы
+    users._promocodes[cleanCode] = {
+        code: cleanCode,
+        maxActivations: parseInt(limit) || 1,
+        currentActivations: 0,
+        reward: parseInt(reward) || 0,
+        activatedBy: [] 
+    };
+
+    queueSave();
+    console.log(`[Promo Engine] Создан промокод: ${cleanCode} (Лимит: ${limit}, Бонус: ${reward})`);
+    res.json({ success: true });
+});
+
+// 2. Активация промокода игроком
+app.post('/api/promo/activate', async (req, res) => {
+    const { userId, code } = req.body;
+    const finalId = String(userId);
+
+    const user = users[finalId];
+    if (!user) return res.status(404).json({ error: "Пользователь не авторизован" });
+
+    if (!users._promocodes) {
+        users._promocodes = {};
+    }
+
+    const cleanCode = String(code).trim().toUpperCase();
+    const promo = users._promocodes[cleanCode];
+
+    if (!promo) {
+        return res.status(404).json({ error: "Такого промокода не существует!" });
+    }
+
+    if (promo.currentActivations >= promo.maxActivations) {
+        return res.status(400).json({ error: "Этот промокод уже закончился!" });
+    }
+
+    if (promo.activatedBy.includes(finalId)) {
+        return res.status(400).json({ error: "Ты уже активировал этот промокод!" });
+    }
+
+    // Процесс начисления
+    promo.currentActivations += 1;
+    promo.activatedBy.push(finalId);
+    user.balance += promo.reward;
+
+    // Записываем лог в историю транзакций юзера для красоты интерфейса
+    const transactionId = `PR-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+    user.messages.push({
+        id: transactionId,
+        amount: promo.reward,
+        timestamp: new Date().toISOString(),
+        type: 'promo_bonus',
+        partnerNickname: 'Система бонусов',
+        senderUsername: 'SYSTEM',
+        comment: `Активация промокода: ${cleanCode}`
+    });
+
+    queueSave();
+    res.json({ success: true, reward: promo.reward, newBalance: user.balance });
+});
+
 app.listen(PORT, async () => {
     console.log(`==================================================`);
     console.log(` Бэк RejewCas успешно запущен на порту: ${PORT}`);
     console.log(` Хранилище синхронизировано с Supabase DB`);
     console.log(`==================================================`);
     await loadDatabase();
-    startBotPolling(); // Запуск лонг-поллинга ТГ
+    startBotPolling(); 
 });
