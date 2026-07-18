@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// ТОКЕН ТВОЕГО БОТА (ВСТАВЬ СВОЙ!)
+// ТОКЕН ТВОЕГО БОТА
 // ==========================================
 const BOT_TOKEN = '8700139578:AAHqYBF2TTDHlwgBcgQQ76ekah0pGoqeFj4';
 
@@ -20,13 +20,11 @@ app.use(express.json());
 const SUPABASE_URL = 'https://tponufkikktrosxrgraz.supabase.co';
 const SUPABASE_KEY = 'sb_secret_R6cj-LP93g28zplARQu8Ug_iK5-wJNr';
 
-// Ссылка на конкретную строчку с нашим JSON файлом в таблице database
 const DB_ENDPOINT = `${SUPABASE_URL}/rest/v1/database?key=eq.users_file`;
 
 let users = {};
 let isDirty = false;
 
-// Загрузка базы данных из Supabase при старте или просыпании Render
 async function loadDatabase() {
     try {
         const response = await axios.get(DB_ENDPOINT, {
@@ -50,7 +48,6 @@ async function loadDatabase() {
     }
 }
 
-// Принудительное сохранение в облако Supabase
 async function saveDatabaseNow() {
     try {
         await axios.patch(DB_ENDPOINT, { data: users }, {
@@ -72,14 +69,12 @@ function queueSave() {
     isDirty = true;
 }
 
-// Проверка авто-сейва каждые 5 секунд
 setInterval(async () => {
     if (isDirty) {
         await saveDatabaseNow();
     }
 }, 5000);
 
-// Инициализация юзера (принимает любые варианты ID)
 function initUser(userId, tgId, username, nickname) {
     const finalId = String(userId || tgId);
     const cleanUsername = String(username || 'player').toLowerCase().replace('@', '').trim();
@@ -107,10 +102,57 @@ function initUser(userId, tgId, username, nickname) {
 const PLINKO_MULTIPLIERS = [5.6, 1.6, 1.1, 0.6, 0.3, 0.6, 1.1, 1.6, 5.6];
 
 // ==========================================
+// TELEGRAM BOT POLLING ENGINE (ОБРАБОТКА КОМАНД)
+// ==========================================
+let lastUpdateId = 0;
+
+async function startBotPolling() {
+    console.log("[Telegram Bot] Запуск бесконечного считывания сообщений...");
+    while (true) {
+        try {
+            const response = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getUpdates`, {
+                params: { offset: lastUpdateId + 1, timeout: 20 },
+                timeout: 25000
+            });
+            
+            if (response.data && response.data.result) {
+                for (const update of response.data.result) {
+                    lastUpdateId = update.update_id;
+                    
+                    if (update.message && update.message.text) {
+                        const text = update.message.text.trim().toLowerCase();
+                        const chatId = update.message.chat.id;
+                        const tgIdStr = String(update.message.from.id);
+                        
+                        // Проверяем триггеры на баланс
+                        if (['баланс', 'б', 'балик'].includes(text)) {
+                            // Находим или создаем юзера на лету
+                            const user = users[tgIdStr] || initUser(tgIdStr, tgIdStr, update.message.from.username, update.message.from.first_name);
+                            
+                            const messageText = `<b>💳 Твой игровой баланс:</b> ${user.balance.toLocaleString()} $RJC\n` +
+                                                `<b>🌍 Гражданство:</b> ${user.currentCitizenship}`;
+                            
+                            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                                chat_id: chatId,
+                                text: messageText,
+                                parse_mode: 'HTML'
+                            });
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.error("[Telegram Bot Polling Error]:", error.message);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+    }
+}
+
+// ==========================================
 // API ЭНДПОИНТЫ
 // ==========================================
 
-// Авторизация / Вход юзера
 app.post('/api/user', async (req, res) => {
     const { userId, tgId, username, nickname } = req.body;
     const finalId = userId || tgId;
@@ -120,7 +162,6 @@ app.post('/api/user', async (req, res) => {
     res.json(user);
 });
 
-// УНИВЕРСАЛЬНЫЙ РАСЧЕТ ИГР (Слоты, Ракетка, Кликер)
 app.post('/api/game/result', async (req, res) => {
     const { userId, tgId, bet, winAmount, isWin } = req.body;
     const finalId = String(userId || tgId);
@@ -131,10 +172,8 @@ app.post('/api/game/result', async (req, res) => {
     const intBet = parseInt(bet || 0);
     const intWin = parseInt(winAmount || 0);
 
-    // Считаем новый баланс
     user.balance = user.balance - intBet + intWin;
 
-    // Обновляем стату (для нормальных игр со ставками)
     if (intBet > 0) {
         user.stats.total += 1;
         if (isWin) user.stats.wins += 1; else user.stats.losses += 1;
@@ -144,9 +183,7 @@ app.post('/api/game/result', async (req, res) => {
     res.json(user);
 });
 
-// ПЕРЕВОДЫ REJEWPAY
 app.post('/api/rejewpay/transfer', async (req, res) => {
-    // ДОБАВИЛ comment В ИЗВЛЕЧЕНИЕ ДАННЫХ
     const { senderId, tgId, receiverUsername, amount, comment } = req.body;
     const finalSenderId = String(senderId || tgId);
     
@@ -176,7 +213,6 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     sender.messages.push({ ...transferLog, type: 'transfer_out', partnerNickname: receiver.nickname });
     receiver.messages.push({ ...transferLog, type: 'transfer_in', partnerNickname: sender.nickname });
 
-    // --- БЛОК УВЕДОМЛЕНИЯ В ТГ ---
     try {
         const tgProfileLink = `tg://user?id=${sender.userId}`;
         const messageText = `<b>💸 Новый перевод в RejewPay!</b>\n\n` +
@@ -193,13 +229,11 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
     } catch (e) {
         console.error("Бот не смог отправить уведомление в ТГ:", e.message);
     }
-    // ----------------------------
 
     queueSave(); 
     res.json({ success: true, newBalance: sender.balance });
 });
 
-// МАГАЗИН КАЗИНО
 app.post('/api/buy', async (req, res) => {
     const { userId, tgId, itemId, itemName, cost, type } = req.body;
     const finalId = String(userId || tgId);
@@ -222,7 +256,6 @@ app.post('/api/buy', async (req, res) => {
     res.json(user);
 });
 
-// ПЛИНКО
 app.post('/api/games/plinko', async (req, res) => {
     const { userId, tgId, bet } = req.body;
     const finalId = String(userId || tgId);
@@ -244,7 +277,6 @@ app.post('/api/games/plinko', async (req, res) => {
     res.json({ bucketIndex, multiplier, winAmount, newBalance: user.balance });
 });
 
-// АДМИНКА ДЛЯ НАДУВА БАЛАНСА
 app.post('/api/admin/add', async (req, res) => {
     const { targetUserId, amount } = req.body;
     const user = users[String(targetUserId)];
@@ -258,7 +290,8 @@ app.post('/api/admin/add', async (req, res) => {
 app.listen(PORT, async () => {
     console.log(`==================================================`);
     console.log(` Бэк RejewCas успешно запущен на порту: ${PORT}`);
-    console.log(` Хранилище переключено на бессмертный Supabase DB`);
+    console.log(` Хранилище синхронизировано с Supabase DB`);
     console.log(`==================================================`);
     await loadDatabase();
+    startBotPolling(); // Запуск лонг-поллинга ТГ
 });
