@@ -62,7 +62,7 @@ async function saveDatabaseNow() {
             }
         });
         isDirty = false;
-        console.log('[Supabase DB] Изменения успешно синхронизированы в PostgreSQL!');
+        console.log('[Supabase DB] Изменения успешно синхронизированы in PostgreSQL!');
     } catch (error) {
         console.error('[Supabase DB] Ошибка сохранения данных:', error.message);
     }
