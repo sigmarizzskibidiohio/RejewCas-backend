@@ -25,6 +25,34 @@ const DB_ENDPOINT = `${SUPABASE_URL}/rest/v1/database?key=eq.users_file`;
 let users = {};
 let isDirty = false;
 
+// Сетка ежедневных бонусов от недвижимости (ID предмета -> бонус коинов в сутки)
+const HOUSE_BONUSES = {
+    'p_palace': 5000000,
+    'p_box': 10,
+    'p_garage': 30,
+    'p_baza': 40,
+    'p_communalka': 90,
+    'p_flat_ru': 180,
+    'p_studio': 550,
+    'p_dacha': 900,
+    'p_cyber_village': 1400,
+    'p_bali': 2300,
+    'p_miami': 4800,
+    'p_dubai': 8200,
+    'p_blogger_mansion': 13000,
+    'p_rublevka': 20000,
+    'p_courch': 36000,
+    'p_flanders_hq': 55000,
+    'p_castle': 110000,
+    'p_police_hq': 180000,
+    'p_penthouse_ny': 260000,
+    'p_island': 600000,
+    'p_hamam_resort': 900000,
+    'p_moon_base': 1100000,
+    'p_cyber_palace': 1500000,
+    'p_bunker': 2000000
+};
+
 async function loadDatabase() {
     try {
         const response = await axios.get(DB_ENDPOINT, {
@@ -36,7 +64,6 @@ async function loadDatabase() {
         
         if (response.data && response.data.length > 0) {
             users = response.data[0].data || {};
-            // Гарантируем наличие системных веток
             if (!users._promocodes) users._promocodes = {};
             if (!users._maintenance) users._maintenance = { enabled: false };
             console.log(`[Supabase DB] Успешно скачано профилей: ${Object.keys(users).length}`);
@@ -78,7 +105,7 @@ setInterval(async () => {
     }
 }, 5000);
 
-function initUser(userId, tgId, username, nickname) {
+function initUser(userId, tgId, username, nickname, referredBy = null) {
     const finalId = String(userId || tgId);
     const cleanUsername = String(username || 'player').toLowerCase().replace('@', '').trim();
     
@@ -90,25 +117,93 @@ function initUser(userId, tgId, username, nickname) {
             balance: 5000,
             currentCitizenship: 'Без гражданства',
             ownedProperties: [],
-            stats: { total: 0, wins: 0, losses: 0 },
+            stats: { total: 0, wins: 0, losses: 0, totalTurnover: 0 },
             messages: [],       
-            gameHistory: []
+            gameHistory: [],
+            referredBy: (referredBy && String(referredBy) !== finalId) ? String(referredBy) : null,
+            rewardedReferrals: [],
+            lastBonusClaim: Date.now()
         };
         queueSave(); 
-    } else if (username && users[finalId].username !== cleanUsername) {
-        users[finalId].username = cleanUsername;
-        queueSave();
+    } else {
+        if (username && users[finalId].username !== cleanUsername) {
+            users[finalId].username = cleanUsername;
+            queueSave();
+        }
+        if (!users[finalId].stats.totalTurnover) users[finalId].stats.totalTurnover = 0;
+        if (!users[finalId].rewardedReferrals) users[finalId].rewardedReferrals = [];
+        if (!users[finalId].lastBonusClaim) users[finalId].lastBonusClaim = Date.now();
     }
     return users[finalId];
 }
 
+// Начисление пассивного дохода от недвижимости при каждом входе/синхронизации
+function processDailyPropertyBonus(user) {
+    const now = Date.now();
+    const msPerDay = 24 * 60 * 60 * 1000;
+    const elapsedDays = Math.floor((now - user.lastBonusClaim) / msPerDay);
+
+    if (elapsedDays > 0) {
+        const currentHouseId = user.ownedProperties.find(id => HOUSE_BONUSES[id] !== undefined);
+        const dailyRate = currentHouseId ? HOUSE_BONUSES[currentHouseId] : 0;
+
+        if (dailyRate > 0) {
+            const totalBonus = dailyRate * elapsedDays;
+            user.balance += totalBonus;
+            user.messages.push({
+                id: `PROP-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+                amount: totalBonus,
+                timestamp: new Date().toISOString(),
+                type: 'property_bonus',
+                partnerNickname: 'Твоя Недвижка',
+                senderUsername: 'SYSTEM',
+                comment: `Ежедневный пассивный доход за ${elapsedDays} дн.`
+            });
+            queueSave();
+        }
+        user.lastBonusClaim += elapsedDays * msPerDay;
+    }
+}
+
+// Проверка выполнения условий реферального бонуса
+function checkReferralStatus(user) {
+    if (user.referredBy && user.stats.totalTurnover >= 2000) {
+        const referrer = users[user.referredBy];
+        if (referrer) {
+            if (!referrer.rewardedReferrals) referrer.rewardedReferrals = [];
+            
+            if (!referrer.rewardedReferrals.includes(user.userId)) {
+                referrer.rewardedReferrals.push(user.userId);
+                const refBonus = 5000; 
+                referrer.balance += refBonus;
+                
+                referrer.messages.push({
+                    id: `REF-${crypto.randomBytes(4).toString('hex').toUpperCase()}`,
+                    amount: refBonus,
+                    timestamp: new Date().toISOString(),
+                    type: 'referral_bonus',
+                    partnerNickname: `Реферал ${user.nickname}`,
+                    senderUsername: user.username,
+                    comment: `Бонус за то, что реферал преодолел оборот в 2000 коинов`
+                });
+
+                try {
+                    axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                        chat_id: referrer.userId,
+                        text: `🔔 <b>Реферальный бонус!</b>\nТвой реферал @${user.username} набил оборот более 2000 коинов! Тебе начислено +5,000 $RJC.`,
+                        parse_mode: 'HTML'
+                    }).catch(() => {});
+                } catch(e) {}
+                
+                queueSave();
+            }
+        }
+    }
+}
+
 const PLINKO_MULTIPLIERS = [5.6, 1.6, 1.1, 0.6, 0.3, 0.6, 1.1, 1.6, 5.6];
 
-// ==========================================
-// TELEGRAM BOT POLLING ENGINE (+РАССЫЛКА /NEW)
-// ==========================================
 let lastUpdateId = 0;
-
 async function startBotPolling() {
     console.log("[Telegram Bot] Запуск бесконечного считывания сообщений...");
     while (true) {
@@ -129,10 +224,8 @@ async function startBotPolling() {
                         const tgIdStr = String(update.message.from.id);
                         const rawUsername = String(update.message.from.username || '').toLowerCase().replace('@', '');
                         
-                        // Проверка админских прав по юзернейму для рассылки
                         const isAdmin = ['root', 'tacuv', 'rejew'].includes(rawUsername);
 
-                        // 3. ФУНКЦИЯ РАССЫЛКИ ОБНОВЛЕНИЙ ПО КОМАНДЕ /new
                         if (rawText.startsWith('/new ') || rawText.startsWith('/new\n')) {
                             if (!isAdmin) {
                                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -146,14 +239,11 @@ async function startBotPolling() {
                             if (!updateContent) {
                                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                                     chat_id: chatId,
-                                    text: `⚠️ Нельзя отправить пустое обновление. Пример: /new Пацаны, завезли новый Плинко!`
+                                    text: `⚠️ Нельзя отправить пустое обновление.`
                                 });
                                 continue;
                             }
 
-                            console.log(`[Admin Broadcast] Запущена массовая рассылка: "${updateContent}"`);
-                            
-                            // Вытаскиваем всех реальных людей (отсекаем системные ключи)
                             const targetUsers = Object.keys(users).filter(key => !key.startsWith('_'));
                             let successCount = 0;
 
@@ -165,11 +255,8 @@ async function startBotPolling() {
                                         parse_mode: 'HTML'
                                     });
                                     successCount++;
-                                    // Крошечный тайм-аут, чтобы Телеграм не выдал Flood Control
                                     await new Promise(res => setTimeout(res, 50));
-                                } catch (err) {
-                                    console.error(`Не удалось отправить рассылку для ID ${targetId}`);
-                                }
+                                } catch (err) {}
                             }
 
                             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -181,7 +268,7 @@ async function startBotPolling() {
 
                         if (['баланс', 'б', 'балик'].includes(text)) {
                             const user = users[tgIdStr] || initUser(tgIdStr, tgIdStr, update.message.from.username, update.message.from.first_name);
-                            
+                            processDailyPropertyBonus(user);
                             const messageText = `<b>💳 Твой игровой баланс:</b> ${user.balance.toLocaleString()} $RJC\n` +
                                                 `<b>🌍 Гражданство:</b> ${user.currentCitizenship}`;
                             
@@ -207,28 +294,21 @@ async function startBotPolling() {
 // ==========================================
 
 app.post('/api/user', async (req, res) => {
-    const { userId, tgId, username, nickname } = req.body;
+    const { userId, tgId, username, nickname, referredBy } = req.body;
     const finalId = userId || tgId;
     if (!finalId) return res.status(400).json({ error: "Пустой userId или tgId" });
     
-    const user = initUser(userId, tgId, username, nickname);
+    const user = initUser(userId, tgId, username, nickname, referredBy);
+    processDailyPropertyBonus(user);
     
-    // Подмешиваем глобальный флаг техобслуживания
     const isMaintenance = users._maintenance ? users._maintenance.enabled : false;
     res.json({ ...user, maintenanceActive: isMaintenance });
 });
 
-// 4. ЭНДПОИНТ ДЛЯ ОДНОКНОПОЧНОГО УПРАВЛЕНИЯ ТЕХОБСЛУЖИВАНИЕМ
 app.post('/api/admin/maintenance/toggle', async (req, res) => {
-    if (!users._maintenance) {
-        users._maintenance = { enabled: false };
-    }
-    
-    // Переключаем триггер
+    if (!users._maintenance) users._maintenance = { enabled: false };
     users._maintenance.enabled = !users._maintenance.enabled;
     queueSave();
-    
-    console.log(`[Admin Panel] Статус техобслуживания изменен на: ${users._maintenance.enabled}`);
     res.json({ success: true, maintenanceActive: users._maintenance.enabled });
 });
 
@@ -246,9 +326,11 @@ app.post('/api/game/result', async (req, res) => {
 
     if (intBet > 0) {
         user.stats.total += 1;
+        user.stats.totalTurnover += intBet;
         if (isWin) user.stats.wins += 1; else user.stats.losses += 1;
     }
 
+    checkReferralStatus(user);
     queueSave();
     res.json(user);
 });
@@ -296,9 +378,7 @@ app.post('/api/rejewpay/transfer', async (req, res) => {
             parse_mode: 'HTML',
             disable_web_page_preview: true
         });
-    } catch (e) {
-        console.error("Бот не смог отправить уведомление в ТГ:", e.message);
-    }
+    } catch (e) {}
 
     queueSave(); 
     res.json({ success: true, newBalance: sender.balance });
@@ -315,6 +395,12 @@ app.post('/api/buy', async (req, res) => {
     if (user.balance < intCost) return res.status(400).json({ error: "Не хватает коинов" });
 
     user.balance -= intCost;
+
+    // ФИКС БАЗЫ: Если покупается недвижимость, удаляем старую хату
+    if (HOUSE_BONUSES[itemId] !== undefined) {
+        user.ownedProperties = user.ownedProperties.filter(id => HOUSE_BONUSES[id] === undefined);
+    }
+
     if (!user.ownedProperties.includes(itemId)) {
         user.ownedProperties.push(itemId);
     }
@@ -326,6 +412,7 @@ app.post('/api/buy', async (req, res) => {
     res.json(user);
 });
 
+// ФИКС ПЛИНКО: Кастомные регулируемые шансы для иксов вместо чистого бинома
 app.post('/api/games/plinko', async (req, res) => {
     const { userId, tgId, bet } = req.body;
     const finalId = String(userId || tgId);
@@ -336,12 +423,29 @@ app.post('/api/games/plinko', async (req, res) => {
     const intBet = parseInt(bet);
     if (user.balance < intBet) return res.status(400).json({ error: "Недостаточно баланса" });
 
+    // Массив весов под каждый из 9 слотов (крайние 5.6х выпадают реже, но теперь шансы четко заданы)
+    const weights = [3, 8, 14, 20, 25, 20, 14, 8, 3]; 
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    let rng = Math.random() * totalWeight;
+    
     let bucketIndex = 0;
-    for (let i = 0; i < 8; i++) { if (Math.random() > 0.5) bucketIndex++; }
+    for (let i = 0; i < weights.length; i++) {
+        if (rng < weights[i]) {
+            bucketIndex = i;
+            break;
+        }
+        rng -= weights[i];
+    }
+
     const multiplier = PLINKO_MULTIPLIERS[bucketIndex];
     const winAmount = Math.floor(intBet * multiplier);
     
     user.balance = user.balance - intBet + winAmount;
+    user.stats.total += 1;
+    user.stats.totalTurnover += intBet;
+    if (multiplier >= 1) user.stats.wins += 1; else user.stats.losses += 1;
+
+    checkReferralStatus(user);
     queueSave();
     
     res.json({ bucketIndex, multiplier, winAmount, newBalance: user.balance });
@@ -382,8 +486,7 @@ app.post('/api/promo/activate', async (req, res) => {
 
     const user = users[finalId];
     if (!user) return res.status(404).json({ error: "Пользователь не авторизован" });
-    if (!users._promocodes) users._promocodes = {};
-
+    
     const cleanCode = String(code).trim().toUpperCase();
     const promo = users._promocodes[cleanCode];
 
@@ -410,7 +513,6 @@ app.post('/api/promo/activate', async (req, res) => {
 app.listen(PORT, async () => {
     console.log(`==================================================`);
     console.log(` Бэк RejewCas успешно запущен на порту: ${PORT}`);
-    console.log(` Хранилище синхронизировано с Supabase DB`);
     console.log(`==================================================`);
     await loadDatabase();
     startBotPolling(); 
