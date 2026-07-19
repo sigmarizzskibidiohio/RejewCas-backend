@@ -137,7 +137,6 @@ function initUser(userId, tgId, username, nickname, referredBy = null) {
     return users[finalId];
 }
 
-// Начисление пассивного дохода от недвижимости при каждом входе/синхронизации
 function processDailyPropertyBonus(user) {
     const now = Date.now();
     const msPerDay = 24 * 60 * 60 * 1000;
@@ -165,7 +164,6 @@ function processDailyPropertyBonus(user) {
     }
 }
 
-// Проверка выполнения условий реферального бонуса
 function checkReferralStatus(user) {
     if (user.referredBy && user.stats.totalTurnover >= 2000) {
         const referrer = users[user.referredBy];
@@ -394,6 +392,14 @@ app.post('/api/buy', async (req, res) => {
     const intCost = parseInt(cost);
     if (user.balance < intCost) return res.status(400).json({ error: "Не хватает коинов" });
 
+    // ЖЁСТКАЯ ПРОВЕРКА ХАММАМА: Нельзя купить просто так, только апгрейд из Атолла
+    if (itemId === 'p_hamam_resort') {
+        const hasIsland = user.ownedProperties.includes('p_island');
+        if (!hasIsland) {
+            return res.status(400).json({ error: "Хаммам нельзя просто купить, бля. Его можно только улучшить, имея Личный Атолл!" });
+        }
+    }
+
     user.balance -= intCost;
 
     // ФИКС БАЗЫ: Если покупается недвижимость, удаляем старую хату
@@ -412,7 +418,6 @@ app.post('/api/buy', async (req, res) => {
     res.json(user);
 });
 
-// ФИКС ПЛИНКО: Кастомные регулируемые шансы для иксов вместо чистого бинома
 app.post('/api/games/plinko', async (req, res) => {
     const { userId, tgId, bet } = req.body;
     const finalId = String(userId || tgId);
@@ -423,7 +428,6 @@ app.post('/api/games/plinko', async (req, res) => {
     const intBet = parseInt(bet);
     if (user.balance < intBet) return res.status(400).json({ error: "Недостаточно баланса" });
 
-    // Массив весов под каждый из 9 слотов (крайние 5.6х выпадают реже, но теперь шансы четко заданы)
     const weights = [3, 8, 14, 20, 25, 20, 14, 8, 3]; 
     const totalWeight = weights.reduce((a, b) => a + b, 0);
     let rng = Math.random() * totalWeight;
